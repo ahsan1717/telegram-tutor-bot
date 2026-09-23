@@ -46,7 +46,6 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 genai.configure(api_key=GEMINI_API_KEY)
 MODEL_NAME = "gemini-3.1-flash-lite"  # current-gen stable model, available to new API keys, supports images
-model = genai.GenerativeModel(MODEL_NAME)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -176,6 +175,34 @@ question is ambiguous, say so and ask for clarification rather than \
 guessing.
 """
 
+# Model is created once with the system prompt as its permanent instruction,
+# separate from the conversation itself - this leaves the actual message
+# history free to be just the back-and-forth with the student.
+model = genai.GenerativeModel(MODEL_NAME, system_instruction=SYSTEM_PROMPT)
+
+# ---------------------------------------------------------------------------
+# Per-user conversation memory: each Telegram user gets their own ongoing
+# Gemini chat session, so follow-up questions ("what about part b?") have
+# access to what was discussed earlier instead of starting from scratch.
+# Sessions live only in memory - they reset if the bot restarts, and a user
+# can also clear their own with /reset.
+# ---------------------------------------------------------------------------
+
+_chat_sessions: dict[int, "genai.ChatSession"] = {}
+MAX_HISTORY_TURNS = 20  # trim old history so token usage doesn't grow forever
+
+
+def _get_chat(user_id: int):
+    chat = _chat_sessions.get(user_id)
+    if chat is None:
+        chat = model.start_chat(history=[])
+        _chat_sessions[user_id] = chat
+    elif len(chat.history) > MAX_HISTORY_TURNS * 2:
+        # Each turn adds 2 entries (user + model); trim oldest ones but keep
+        # the session object so it still feels continuous to the student.
+        chat.history = chat.history[-MAX_HISTORY_TURNS * 2:]
+    return chat
+
 
 # ---------------------------------------------------------------------------
 # Safety-net cleanup: even with the instructions above, an AI model can
@@ -246,10 +273,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "- A-Level (JC): H1/H2 Math, Physics, Chemistry, Biology, Economics "
         "(including Case Study AQs), and GP/English essays\n\n"
         "Send me a question as text, or a photo of your working/essay, and "
-        "I'll mark it exam-style with a model answer.\n\n"
+        "I'll mark it exam-style with a model answer. I'll remember our "
+        "conversation, so you can ask follow-up questions naturally - send "
+        "/reset any time to start a fresh topic.\n\n"
         "Note: I'm an AI tutor, not an official MOE/Cambridge marker - "
         "always check against your teacher's guidance for anything graded."
     )
+
+
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    _chat_sessions.pop(user_id, None)
+    await update.message.reply_text("Cleared! Starting fresh on your next question.")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -264,7 +299,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     question = update.message.text
 
     try:
-        response = model.generate_content([SYSTEM_PROMPT, question])
+        chat = _get_chat(user_id)
+        response = chat.send_message(question)
         await send_reply(update, response.text)
     except Exception:
         logger.exception("Gemini call failed")
@@ -293,9 +329,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
     try:
-        response = model.generate_content(
+        chat = _get_chat(user_id)
+        response = chat.send_message(
             [
-                SYSTEM_PROMPT,
                 caption,
                 {"mime_type": "image/jpeg", "data": bytes(photo_bytes)},
             ]
@@ -345,6 +381,7 @@ def main() -> None:
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("reset", reset))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.ALL, unknown))
