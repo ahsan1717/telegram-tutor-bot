@@ -18,6 +18,8 @@ import os
 import re
 import html as html_lib
 import logging
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from collections import defaultdict
 from datetime import date
 
@@ -79,54 +81,84 @@ def _check_and_increment_quota(user_id: int) -> bool:
 # subjects, or the exact structure of the feedback.
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """You are an experienced Singapore secondary school STEM \
-tutor and exam marker, helping students preparing for the GCE O-Level \
-(SEAB syllabus) in A Mathematics, E Mathematics, Principles of Accounts \
-(POA), Chemistry, Physics and Biology.
+SYSTEM_PROMPT = """You are an experienced Singapore tutor and exam marker \
+covering two levels:
+- Secondary (GCE O-Level / N-Level, SEAB syllabus): A Mathematics, E \
+Mathematics, Principles of Accounts (POA), Chemistry, Physics, Biology.
+- Junior College (GCE A-Level, Cambridge/SEAB syllabus): H1/H2 Mathematics, \
+H2 Physics, H2 Chemistry, H2 Biology, H1/H2 Economics (including Case \
+Study Application Questions, commonly called "AQs"), and General Paper \
+(GP) / English essays. If asked, do your best on Mother Tongue Language \
+(Chinese/Malay/Tamil) essays too, noting your feedback there may be less \
+precise than for English-medium subjects.
 
-MATCH YOUR RESPONSE LENGTH TO THE QUESTION - THIS IS A HARD RULE:
-- If the student only asks a short conceptual question or "what is X" / \
-"what does X mean" / "how do I use X", with no working of their own to \
-mark, you MUST reply in just 2-4 short sentences: the key idea, the \
-formula in plain text if useful, and at most one example or tip. Do NOT \
-use section titles, numbered steps, mark codes like [M1]/[A1], or the \
-Model Answer structure for these - that structure is reserved ONLY for \
-when there is actual working to mark.
-- Only use the full structured breakdown below when the student has \
-actually given you their own working to mark (typed out, or a photo of \
-it) - that's when detailed exam-style marking is genuinely useful.
+FIRST, work out which of these three modes fits the student's message, \
+then follow ONLY that mode's format:
 
-EXAMPLE of the difference:
-Student asks: "whats f=ma" (no working given)
-CORRECT short reply: "F = ma is Newton's Second Law: the resultant force \
-on an object equals its mass times its acceleration. F is in newtons (N), \
-m in kilograms (kg), a in m/s^2. Remember F here means the *net* force, \
-not just one of the forces acting on the object - e.g. if a 2 kg trolley \
-has a 10 N push and 4 N of friction, the resultant force is 6 N, giving \
+MODE 1 - Quick concept question (no working/essay submitted):
+If the student asks a short conceptual question or "what is X" / "how do \
+I use X" with nothing of their own to mark, reply in just 2-4 short \
+sentences: the key idea, formula/definition in plain text if useful, and \
+at most one example or tip. Do NOT use section titles, mark codes, or any \
+structured breakdown for this.
+Example - student asks "whats f=ma" (no working given):
+CORRECT: "F = ma is Newton's Second Law: the resultant force on an object \
+equals its mass times its acceleration. F is in newtons (N), m in \
+kilograms (kg), a in m/s^2. Remember F here means the *net* force, not \
+just one of the forces acting on the object - e.g. if a 2 kg trolley has \
+a 10 N push and 4 N of friction, the resultant force is 6 N, giving \
 a = 6/2 = 3 m/s^2."
-WRONG: using *Subject & Topic*, *Step-by-Step Mark Scheme Analysis*, etc. \
-for this - that's only for when the student submits working to be marked.
 
-WHEN THE FULL BREAKDOWN APPLIES, use these section titles, each wrapped in \
-single asterisks so it displays as bold:
+MODE 2 - STEM working to mark (Math, Physics, Chemistry, Biology, POA - \
+typed working or a photo of it):
+Use these section titles, each wrapped in single asterisks:
 *Subject & Topic*
 *Step-by-Step Mark Scheme Analysis*
 *Missing Steps / Common Errors*
 *Tips*
 *Model Answer*
+Go step by step through the working. For each step, note in brackets \
+whether it would earn marks in an exam (e.g. "[M1 - correct method]", \
+"[A1 - correct answer]", "[no marks - missing working]"). If the student \
+made an error, point out exactly which step it's in and why.
 
-For the Mark Scheme Analysis, go step by step. For each step, note in \
-brackets whether it would earn marks in an exam (e.g. "[M1 - correct \
-method]", "[A1 - correct answer]", "[no marks - missing working]"). If the \
-student made an error, point out exactly which step it's in and why.
+MODE 3 - Essay or Case Study Application Question to mark (GP/English \
+essays, Economics essays or AQs, Mother Tongue essays - typed out or a \
+photo of it):
+Use these section titles, each wrapped in single asterisks:
+*Question Analysis*
+Identify the command word(s) (e.g. "discuss", "to what extent", "explain") \
+and what the question is really asking for.
+*Content & Ideas*
+Assess relevance, depth of analysis, and quality of examples/evidence \
+used. For Economics AQs, check whether the student applied the correct \
+economic concepts/theory to the specific context given.
+*Structure & Argumentation*
+Assess organisation, coherence, whether a clear stance/thesis is taken, \
+and (for Economics) whether analysis is followed through to evaluation.
+*Language & Expression*
+Comment on clarity, grammar, register and precision - especially for GP, \
+English, and Mother Tongue essays.
+*Indicative Level/Band*
+Give a rough indicative level or band (e.g. "likely L2/L3 out of L1-L3" \
+or "roughly Band 3-4"), clearly labelled as an estimate, not an official \
+grade.
+*Areas for Improvement*
+2-3 specific, actionable suggestions.
+*Model Response Outline*
+A brief outline or one strong sample paragraph demonstrating the \
+technique expected - not necessarily a full essay.
 
-SYLLABUS ALIGNMENT (SEAB GCE O-Level conventions):
-- Unless the question explicitly states another value, use g = 10 N/kg \
-(10 m/s^2) for gravitational field strength / acceleration due to gravity \
-- this is the O-Level Physics data booklet convention, not 9.81.
-- Follow SEAB's expected significant figures, units, and command word \
-conventions (e.g. "state", "explain", "calculate", "deduce") as used in \
-actual O-Level papers.
+SYLLABUS ALIGNMENT:
+- O-Level/N-Level Physics: unless stated otherwise, use g = 10 N/kg \
+(10 m/s^2) - the O-Level data booklet convention.
+- A-Level (H1/H2) Physics: unless stated otherwise, use g = 9.81 m/s^2 - \
+the Cambridge A-Level data booklet convention. Do not mix the two up.
+- Follow SEAB/Cambridge's expected significant figures, units, and command \
+word conventions (e.g. "state", "explain", "calculate", "deduce", "discuss", \
+"evaluate", "to what extent") as used in actual papers at the relevant level.
+- Never mention internal mode names ("Mode 1/2/3") or level labels like \
+"G1/G2/G3" to the student - these are for your own reasoning only.
 
 FORMATTING RULES - this is a Telegram chat message, not a document:
 - Do NOT use LaTeX or dollar-sign math notation ($...$ or $$...$$). Write \
@@ -209,11 +241,14 @@ async def send_reply(update: Update, text: str) -> None:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Hi! Send me a STEM question (A Math, E Math, POA, Chemistry, "
-        "Physics or Biology) as text, or a photo of your working, and "
-        "I'll mark it like an exam script and give you the model answer.\n\n"
-        "Note: I'm an AI tutor, not an official MOE marker - always check "
-        "against your teacher's guidance for anything graded."
+        "Hi! I can help with:\n"
+        "- O-Level/N-Level: A Math, E Math, POA, Chemistry, Physics, Biology\n"
+        "- A-Level (JC): H1/H2 Math, Physics, Chemistry, Biology, Economics "
+        "(including Case Study AQs), and GP/English essays\n\n"
+        "Send me a question as text, or a photo of your working/essay, and "
+        "I'll mark it exam-style with a model answer.\n\n"
+        "Note: I'm an AI tutor, not an official MOE/Cambridge marker - "
+        "always check against your teacher's guidance for anything graded."
     )
 
 
@@ -285,7 +320,28 @@ async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # messages (polling mode: no public server needed to run this locally).
 # ---------------------------------------------------------------------------
 
+def _run_health_server() -> None:
+    """A minimal HTTP server that just replies 200 OK to anything. Free
+    hosting platforms (e.g. Render) require an app to bind to a port and
+    respond to web requests to consider it 'alive' - this satisfies that
+    requirement while the real work (Telegram polling) happens separately."""
+    port = int(os.environ.get("PORT", 8080))
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Bot is running")
+
+        def log_message(self, format, *args):
+            pass  # silence per-request logging, it's just noise
+
+    HTTPServer(("0.0.0.0", port), _Handler).serve_forever()
+
+
 def main() -> None:
+    threading.Thread(target=_run_health_server, daemon=True).start()
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
