@@ -198,9 +198,11 @@ def _get_chat(user_id: int):
         chat = model.start_chat(history=[])
         _chat_sessions[user_id] = chat
     elif len(chat.history) > MAX_HISTORY_TURNS * 2:
-        # Each turn adds 2 entries (user + model); trim oldest ones but keep
-        # the session object so it still feels continuous to the student.
-        chat.history = chat.history[-MAX_HISTORY_TURNS * 2:]
+        # chat.history can't be reassigned directly (it's read-only), so we
+        # start a fresh session seeded with just the trimmed history instead.
+        trimmed = chat.history[-MAX_HISTORY_TURNS * 2:]
+        chat = model.start_chat(history=trimmed)
+        _chat_sessions[user_id] = chat
     return chat
 
 
